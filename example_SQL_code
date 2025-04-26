@@ -1,0 +1,427 @@
+--table 1 -- issue with missing dates and MA7: num_players_started_match
+SELECT session_date, 
+    game_started,
+    unique_players_started_match,
+    AVG(unique_players_started_match) OVER (
+        PARTITION BY game_started 
+        ORDER BY session_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7
+FROM 
+(SELECT 
+    session_date, event_params.value.string_value AS game_started,
+    COALESCE(COUNT(DISTINCT uid), 0) AS unique_players_started_match,   
+FROM 
+    `boardible-e039c.silver_layer.app_events_cleaned`, ##14-1-2023
+    UNNEST(event_params) AS event_params
+WHERE 
+    event_name = "StartedMatch" AND event_params.key = 'CurrentGame'
+GROUP BY  
+    event_params.value.string_value, session_date)
+#ORDER BY  game_started, session_date)
+ORDER BY game_started, session_date
+
+--table 2: reveneue_aquisition_operating_system
+WITH unnested_events AS (
+  SELECT 
+    session_date, 
+    event_name, 
+    acquisition_type, 
+    device.operating_system AS operating_system, 
+    event_params.key AS param_key,
+    event_params.value.string_value AS param_value_string,
+    event_params.value.int_value AS param_value_int
+  FROM 
+    `boardible-e039c.silver_layer.app_events_cleaned`, 
+    UNNEST(event_params) AS event_params
+  WHERE 
+    event_name = 'StorePurchase' AND (event_params.key = "success" OR event_params.key = "paymentType" OR event_params.key = "dolarPriceReference"))
+
+SELECT session_date, acquisition_type, operating_system, SUM(param_value_int) AS total_cash_revenue
+FROM unnested_events
+WHERE param_value_string = "True" or param_value_string = "cash" or param_value_string is NULL
+GROUP BY session_date,acquisition_type,operating_system
+ORDER BY session_date, acquisition_type, operating_system
+
+--table3: total_matches_solo_multiplayer
+WITH unnested_events AS (
+  SELECT 
+    session_date, 
+    event_name, 
+    uid, 
+    event_params.key AS param_key,
+    event_params.value.string_value AS param_value_string
+  FROM 
+    `boardible-e039c.silver_layer.app_events_cleaned`, 
+    UNNEST(event_params) AS event_params
+  WHERE 
+    event_name = 'StartedMatch' AND event_params.key = "isSoloPlay")
+
+SELECT session_date,COUNT(event_name) AS total_num_matches_started ,
+    COUNT(CASE WHEN param_value_string = "True" THEN 1 END) AS num_solo_player,
+    COUNT(CASE WHEN param_value_string = "False" THEN 1 END) AS num_multiplayer,
+    AVG(COUNT(event_name)) OVER (
+        ORDER BY session_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7_total_matches, 
+    AVG(COUNT(CASE WHEN param_value_string = "True" THEN 1 END)) OVER (
+        ORDER BY session_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7_solo, 
+    AVG(COUNT(CASE WHEN param_value_string = "False" THEN 1 END)) OVER (
+        ORDER BY session_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7_multiplayer
+FROM unnested_events
+GROUP BY session_date
+ORDER BY session_date 
+
+--table 4: new_returning_started_match
+SELECT  -- have an issue with missing dates 
+    install_date,
+    COUNT(event_name) AS total_numb_users_started_match,
+    COUNT(CASE WHEN dsi = 0 THEN 1 ELSE NULL END) AS new_user, 
+    COUNT(CASE WHEN dsi > 0 THEN 1 ELSE NULL END) AS returning,
+    AVG(COUNT(event_name)) OVER (
+        ORDER BY install_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7_total, 
+    AVG(COUNT(CASE WHEN dsi = 0 THEN 1 ELSE NULL END)) OVER (
+        ORDER BY install_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7_new,
+    AVG(COUNT(CASE WHEN dsi > 0 THEN 1 ELSE NULL END)) OVER (
+        ORDER BY install_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7_returning
+FROM  `boardible-e039c.silver_layer.app_events_cleaned`
+WHERE 
+    event_name = 'StartedMatch'
+GROUP BY install_date
+ORDER BY install_date
+
+--table 5: %download conversion - have issue with missing dates -- downloads_to_unique_multiplayer
+
+--finding numerator: total numb of installs 
+WITH total_num_installs AS 
+(SELECT install_date, SUM(num_unique_users_who_installed) AS total_num_unique_installs_on_that_day
+FROM 
+(SELECT install_date, COUNT(DISTINCT (uid)) AS num_unique_users_who_installed
+FROM  `boardible-e039c.silver_layer.app_events_cleaned`
+GROUP BY install_date, uid
+ORDER BY install_date)
+GROUP BY install_date
+ORDER BY install_date),
+
+--finding the denominator -- filters for people who played a multiplayergame on same date of install
+unnested_events AS (
+  SELECT 
+    session_date, 
+    install_date,
+    uid,dsi,
+    event_name,  
+    event_params.key AS param_key,
+    event_params.value.string_value AS param_value_string,
+    event_params.value.int_value AS param_value_int
+  FROM 
+    `boardible-e039c.silver_layer.app_events_cleaned`, 
+    UNNEST(event_params) AS event_params
+  WHERE 
+    event_name = 'StartedMatch' AND event_params.key = "isSoloPlay"),
+
+num_multiplayer AS (SELECT install_date, SUM(num_unique_multiplayer) AS total_num_unique_multiplayer
+FROM    
+(SELECT install_date, COUNT(DISTINCT CASE WHEN param_value_string ="False" THEN "multiplayer" END ) AS num_unique_multiplayer
+FROM unnested_events
+WHERE session_date=install_date
+GROUP BY install_date, uid
+ORDER BY install_date)
+GROUP BY install_date
+ORDER BY install_date
+)
+
+--joining the tables + finding MA7
+SELECT total_num_installs.install_date, total_num_installs.total_num_unique_installs_on_that_day, num_multiplayer.total_num_unique_multiplayer, AVG(total_num_installs.total_num_unique_installs_on_that_day) OVER (
+        ORDER BY install_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7_total_unique_installs,
+    AVG(num_multiplayer.total_num_unique_multiplayer) OVER (
+        ORDER BY install_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS MA7_total_unique_multiplayer
+FROM total_num_installs
+INNER JOIN num_multiplayer
+USING (install_date)
+ORDER BY install_date
+
+-- table 6/a -- match_multiplayer_game -- have no rows for games that aren't played. need to fix  that and add count =0 
+WITH unnested_events_multiplayer AS (
+SELECT
+  session_date,
+  install_date,
+  uid,
+  dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS param_value_string,
+  event_params.value.int_value AS param_value_int
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'StartedMatch'
+  AND event_params.key = "isSoloPlay" ), 
+  unnested_events_game AS (SELECT
+  session_date,
+  --install_date,
+  --uid,
+  --dsi,
+  --event_name,
+  --event_params.key AS param_key,
+  event_params.value.string_value AS param_value_string,
+  --event_params.value.int_value AS param_value_int
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'StartedMatch'
+  AND event_params.key = "CurrentGame"),
+
+multiplayer_2 AS (SELECT
+  session_date,
+  CASE
+    WHEN param_value_string = "False" THEN 1
+    WHEN param_value_string = "True" THEN 0
+END
+  AS is_multiplayer
+FROM
+  unnested_events_multiplayer)
+
+SELECT unnested_events_game.session_date,unnested_events_game.param_value_string AS game, SUM(multiplayer_2.is_multiplayer) AS num_multiplayer_matches
+FROM unnested_events_game
+INNER JOIN multiplayer_2
+USING (session_date)
+GROUP BY session_date, param_value_string
+ORDER BY session_date, param_value_string
+
+-- 7/d distinct_player_clicked
+WITH unnested_events AS (
+SELECT
+  session_date,
+  install_date,
+  uid,
+  dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS game,
+  event_params.value.int_value AS param_value_int
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'GameChoose'
+  AND event_params.key = "GameId" )
+
+SELECT session_date, COUNT (DISTINCT uid) AS num_unique_users_clicked_on_game, game
+FROM unnested_events
+GROUP BY session_date, game
+ORDER BY session_date 
+
+--7/e distinct_users_join_room_one_plus_people
+--querry I used
+WITH 
+  unnested_connected_users AS (
+SELECT
+  session_date,
+  --install_date,
+  uid,
+  --dsi,
+  --event_name,
+  event_params.key AS param_key,
+  --event_params.value.string_value AS param_value_string,
+  --event_params.value.int_value AS num_users_in_room
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'ConnectedToRoom' AND event_params.key ="ConnectedUsers"
+  AND event_params.value.int_value >0  ),
+
+  unnested_join_room AS (SELECT
+  session_date,
+  --install_date,
+  uid,
+  --dsi,
+  event_name,
+  event_params.key,
+  --CASE WHEN event_params.key = "ga_session_id" THEN 1 ELSE 0 END AS joined_room ,
+  --event_params.value.string_value AS param_value_string,
+  --event_params.value.int_value AS param_value_int
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'JoinRoom' 
+  AND event_params.key = "ga_session_id"),
+
+  unnested_game AS (SELECT
+  session_date,
+  --install_date,
+  uid,
+  --dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS current_game,
+  --event_params.value.int_value AS num_users_in_room
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'ConnectedToRoom' AND event_params.key ="CurrentGame"
+  )
+
+SELECT final_table.session_date, final_table.current_game, COUNT (DISTINCT final_table.uid) AS distinct_users_join_room_with_others 
+FROM (
+SELECT unnested_connected_users.session_date, unnested_connected_users.uid, unnested_game.current_game--, unnested_join_room.joined_room , unnested_connected_users.num_users_in_room,
+FROM unnested_connected_users
+INNER JOIN unnested_game
+USING (session_date, uid)
+INNER JOIN unnested_join_room
+USING (session_date, uid)) AS final_table 
+GROUP BY final_table.current_game, final_table.session_date
+ORDER BY final_table.session_date, final_table.current_game
+
+--10/a -- customization_edit_name
+WITH unnested_events AS (
+SELECT
+  session_date,
+  install_date,
+  uid,
+  dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS string_value,
+  event_params.value.int_value AS param_value_int
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'EditName'
+  AND event_params.key = "NewName"
+  ORDER BY session_date ), --ConfirmProfile
+
+  confirm_profile AS (SELECT 
+    session_date, 
+  install_date,
+  uid,
+  dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS string_value_param,
+  event_params.value.int_value AS param_value_int  
+FROM 
+    `boardible-e039c.silver_layer.app_events_cleaned`, ##14-1-2023
+    UNNEST(event_params) AS event_params
+WHERE 
+    event_name = 'ConfirmProfile'
+  AND event_params.key = "Success")
+
+SELECT session_date, COUNT (DISTINCT uid) AS numb_changed_name_successfuly
+FROM (SELECT t2.session_date, t2.uid, t2.event_name, t2.string_value_param --t2.install_date, t1.event_name, t1.string_value, t2.dsi
+FROM unnested_events AS t1
+INNER JOIN confirm_profile AS t2
+USING (session_date, uid)
+WHERE t2.string_value_param = "True") 
+GROUP BY session_date
+ORDER BY session_date
+
+-- actual query used 
+WITH unnested_events AS (
+SELECT
+  session_date,
+  install_date,
+  uid,
+  dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS string_value,
+  event_params.value.int_value AS param_value_int
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'EditName'
+  AND event_params.key = "NewName"
+  ORDER BY session_date )
+
+SELECT session_date, COUNT (DISTINCT uid) AS numb_changed_name_successfuly
+FROM unnested_events
+GROUP BY session_date
+ORDER BY session_date
+--10/b -- customization_edit_avatar
+WITH unnested_events AS (
+SELECT
+  session_date,
+  install_date,
+  uid,
+  dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS string_value,
+  event_params.value.int_value AS param_value_int
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+  event_name = 'EditAvatar'
+  AND event_params.key = "NewValue"
+  ORDER BY session_date ), --ConfirmProfile
+
+  confirm_profile AS (SELECT 
+    session_date, 
+  install_date,
+  uid,
+  dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS string_value_param,
+  event_params.value.int_value AS param_value_int  
+FROM 
+    `boardible-e039c.silver_layer.app_events_cleaned`, ##14-1-2023
+    UNNEST(event_params) AS event_params
+WHERE 
+    event_name = 'ConfirmProfile'
+  AND event_params.key = "Success")
+
+SELECT session_date, COUNT (DISTINCT uid) AS numb_distinct_user_changed_avatar_successfuly
+FROM (SELECT t2.session_date, t2.uid, t2.event_name, t2.string_value_param --t2.install_date, t1.event_name, t1.string_value, t2.dsi
+FROM unnested_events AS t1
+INNER JOIN confirm_profile AS t2
+USING (session_date, uid)
+WHERE t2.string_value_param = "True") 
+GROUP BY session_date
+ORDER BY session_date
+
+--query actually used
+WITH unnested_events AS (
+SELECT
+  session_date,
+  install_date,
+  uid,
+  dsi,
+  event_name,
+  event_params.key AS param_key,
+  event_params.value.string_value AS string_value,
+  event_params.value.int_value AS param_value_int
+FROM
+  `boardible-e039c.silver_layer.app_events_cleaned`,
+  UNNEST(event_params) AS event_params
+WHERE
+ event_name = 'EditAvatar'
+  AND event_params.key = "NewValue"
+ )
+
+SELECT session_date, COUNT (DISTINCT uid) AS numb_changed_name_successfuly
+FROM unnested_events
+GROUP BY session_date
+ORDER BY session_date
