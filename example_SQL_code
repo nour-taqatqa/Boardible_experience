@@ -1,5 +1,5 @@
 ```sql
---table 1 -- issue with missing dates and MA7: num_players_started_match
+table 1 -- issue with missing dates and MA7: num_players_started_match
 SELECT session_date, 
     game_started,
     unique_players_started_match,
